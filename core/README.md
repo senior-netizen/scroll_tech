@@ -33,16 +33,32 @@ Orders are persisted with `pending_sync = 1` first, then corresponding queue ope
 
 Queue processing is guarded with single-flight (`_isFlushing`) to avoid concurrent flush races.
 
-## Transactional Integrity and Offline Reliability
+## Security
 
-The system relies on explicit invariants that must hold across local persistence, sync, and remote confirmation workflows.
+### Payment Proof Upload Threat Model
 
-### Invariants
+#### Threats
 
-| Invariant (strict form) | Enforcement layer | Failure handling | Verification method |
-| --- | --- | --- | --- |
-| `∀ variant_id: available_stock >= 0` | DB constraint (`CHECK (available_stock >= 0)`) + transaction logic in stock decrement path | Reject write if constraint fails; retry only after upstream reconciliation updates stock baseline | Integration test: concurrent reservation/order writes cannot produce negative stock |
-| `reservation.expires_at > reservation.created_at ∧ now > expires_at => reservation.state = EXPIRED ∧ reserved_qty = 0` | Transaction logic on reservation consume path + background reconciler for stale reservations | Reject consume on expired reservation; reconciler marks expired and restores stock | Periodic audit query: find reservations past `expires_at` still marked active |
-| `createOrderIntent(client_token, cart_hash)` is idempotent: repeated requests with same `client_token` return same `order_intent_id` and no duplicate side effects | DB uniqueness constraint on `client_token` + API validator + transaction logic for upsert/return-existing | Reject conflicting payload for same token; return existing intent for exact replay; retry safe on network timeout | Unit test: duplicate intent creation with same token yields identical intent id and single persisted row |
-| `order_state` transitions are monotonic: `state_{n+1} ∈ AllowedSuccessors(state_n)` and never regresses | Transaction logic in order state transition service + API validator | Reject invalid transition; alert on detected regression from external callback/source | Integration test: invalid backward transition (`CONFIRMED -> PENDING`) is rejected |
-| Payment confirmation source-of-truth is unique: `order.payment_confirmed = true` only when verified provider event/receipt exists in canonical payments table | DB constraint/foreign-key to canonical payment record + transaction logic in payment finalization + background reconciler for mismatches | Reject local/manual confirmation writes; reconcile divergent rows; alert on missing/duplicate provider confirmations | Periodic audit query: confirmed orders without canonical payment evidence must be zero |
+- **MIME spoofing:** attackers upload executable or active payloads with falsified `Content-Type` values.
+- **Large-file abuse:** oversized uploads attempt to exhaust bandwidth, storage, or scanning workers.
+- **Replay:** previously valid upload authorizations are reused to attach stale/forged payment proof.
+- **Unauthorized object overwrite:** users attempt key collision or path traversal to replace another order's proof.
+- **Malicious content:** uploaded files embed malware, phishing lures, or weaponized document payloads.
+
+#### Controls
+
+- **Strict signed URL conditions:** signed upload policies enforce `content-length-range`, an allowlist of MIME types, and an order-scoped key prefix that cannot be escaped.
+- **One-time upload tokens:** upload intents are minted as single-use tokens cryptographically bound to `order_id` + `user_id` and expire quickly.
+- **Server-side metadata verification:** before state transitions (for example, `awaiting_verification` → `proof_received`), backend verifies object key, size, MIME, checksum/ETag, and token linkage.
+- **Asynchronous malware scanning + quarantine:** all new objects enter a quarantine state, are scanned out-of-band, and only promoted to a trusted prefix after a clean verdict.
+- **Deny-public storage + least privilege IAM:** bucket policies deny any public ACL/policy path; principals get minimal actions scoped to exact prefixes and required operations.
+
+#### Detection
+
+- Alert on abnormal upload size distributions and per-user/per-order upload rate spikes.
+- Alert on repeated signed URL/token signature validation failures (possible brute force or replay probing).
+
+#### Recovery
+
+- Quarantine and re-verification flow: suspicious or newly-indicated-malicious objects are re-quarantined, rescanned with updated signatures, and detached from order state until cleared.
+- Manual review escalation path: route unresolved detections to operations/fraud reviewers with order timeline, uploader identity, metadata, and scan telemetry for explicit disposition.
