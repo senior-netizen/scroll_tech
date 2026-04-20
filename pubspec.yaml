@@ -1,33 +1,20 @@
 name: scroll_tech
-
-description: Modular Flutter baseline for Scroll Tech.
-publish_to: 'none'
-
 version: 1.0.0+1
+publish_to: none
 
 environment:
-  sdk: '>=3.3.0 <4.0.0'
+  sdk: ">=3.3.0 <4.0.0"
 
 dependencies:
   flutter:
     sdk: flutter
-  cupertino_icons: ^1.0.8
   flutter_bloc: ^8.1.6
-  equatable: ^2.0.7
-  dio: ^5.9.0
-  json_annotation: ^4.9.0
-  hive: ^2.2.3
-  hive_flutter: ^1.1.0
-  connectivity_plus: ^6.1.5
-  google_maps_flutter: ^2.12.3
-  cached_network_image: ^3.4.1
+  equatable: ^2.0.5
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^5.0.0
-  build_runner: ^2.4.13
-  json_serializable: ^6.9.0
+  flutter_lints: ^4.0.0
 
 flutter:
   uses-material-design: true
