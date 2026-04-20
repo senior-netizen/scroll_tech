@@ -32,3 +32,33 @@ Orders are persisted with `pending_sync = 1` first, then corresponding queue ope
    - transient failure: exponential backoff + jitter and retry
 
 Queue processing is guarded with single-flight (`_isFlushing`) to avoid concurrent flush races.
+
+## Security
+
+### Payment Proof Upload Threat Model
+
+#### Threats
+
+- **MIME spoofing:** attackers upload executable or active payloads with falsified `Content-Type` values.
+- **Large-file abuse:** oversized uploads attempt to exhaust bandwidth, storage, or scanning workers.
+- **Replay:** previously valid upload authorizations are reused to attach stale/forged payment proof.
+- **Unauthorized object overwrite:** users attempt key collision or path traversal to replace another order's proof.
+- **Malicious content:** uploaded files embed malware, phishing lures, or weaponized document payloads.
+
+#### Controls
+
+- **Strict signed URL conditions:** signed upload policies enforce `content-length-range`, an allowlist of MIME types, and an order-scoped key prefix that cannot be escaped.
+- **One-time upload tokens:** upload intents are minted as single-use tokens cryptographically bound to `order_id` + `user_id` and expire quickly.
+- **Server-side metadata verification:** before state transitions (for example, `awaiting_verification` → `proof_received`), backend verifies object key, size, MIME, checksum/ETag, and token linkage.
+- **Asynchronous malware scanning + quarantine:** all new objects enter a quarantine state, are scanned out-of-band, and only promoted to a trusted prefix after a clean verdict.
+- **Deny-public storage + least privilege IAM:** bucket policies deny any public ACL/policy path; principals get minimal actions scoped to exact prefixes and required operations.
+
+#### Detection
+
+- Alert on abnormal upload size distributions and per-user/per-order upload rate spikes.
+- Alert on repeated signed URL/token signature validation failures (possible brute force or replay probing).
+
+#### Recovery
+
+- Quarantine and re-verification flow: suspicious or newly-indicated-malicious objects are re-quarantined, rescanned with updated signatures, and detached from order state until cleared.
+- Manual review escalation path: route unresolved detections to operations/fraud reviewers with order timeline, uploader identity, metadata, and scan telemetry for explicit disposition.
