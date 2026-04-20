@@ -33,110 +33,16 @@ Orders are persisted with `pending_sync = 1` first, then corresponding queue ope
 
 Queue processing is guarded with single-flight (`_isFlushing`) to avoid concurrent flush races.
 
-## Assumptions and Concurrency Model
+## Transactional Integrity and Offline Reliability
 
-- Each API replica maintains an isolated DB connection pool.
-- Queue workers are horizontally scaled consumers that process idempotent jobs.
-- Retry behavior assumes at-least-once delivery and idempotent downstream writes.
-- Redis is used for ephemeral coordination/state with explicit TTL defaults.
+The system relies on explicit invariants that must hold across local persistence, sync, and remote confirmation workflows.
 
-### Capacity Workbook
+### Invariants
 
-Use this workbook before load tests and before increasing production concurrency limits.
-
-#### 1) DB pooling model
-
-Formula:
-
-- `total_pool_size = api_replicas × pool_per_replica`
-- Hard constraint: `total_pool_size <= (postgresql_max_connections - admin_headroom)`
-
-Operational policy:
-
-- Reserve admin headroom for migrations, psql sessions, observability agents, and failover operations.
-- Keep `target_pool_usage <= 70%` during sustained peak to preserve burst handling.
-
-#### 2) Worker sizing model
-
-Formula:
-
-- `required_workers ≈ ingress_rate × avg_job_time / target_utilization`
-
-Where:
-
-- `ingress_rate` is jobs/sec.
-- `avg_job_time` is seconds/job.
-- `target_utilization` is a bounded value (typically 0.60-0.75).
-
-Backlog burn-down model (oldest-message-age SLO):
-
-- `backlog_clear_time = backlog_depth / (effective_throughput - ingress_rate)`
-- `effective_throughput = (workers / avg_job_time) × target_utilization`
-- To meet SLO: `backlog_clear_time <= max_oldest_message_age_slo`
-
-If `effective_throughput <= ingress_rate`, backlog age diverges and SLO breach is guaranteed.
-
-#### 3) Redis memory model
-
-Formula:
-
-- `redis_required_bytes = estimated_bytes_per_key × key_count × overhead_factor`
-
-Operational assumptions:
-
-- `overhead_factor` should include allocator + metadata overhead (commonly `1.3-1.8`, choose conservatively).
-- TTL-based churn must model concurrent live keys, not daily writes alone.
-- Churn estimation:
-  - `live_key_count ≈ write_rate_per_sec × ttl_seconds` (steady state)
-  - Replace `key_count` with `max(observed_live_keys, modeled_live_key_count)` for capacity planning.
-
-#### 4) Worked example: 10,000 active users
-
-Assumptions (conservative):
-
-- Peak API replicas: `8`
-- Pool per replica: `20`
-- PostgreSQL `max_connections`: `300`
-- Admin headroom: `60`
-- Queue ingress: `120 jobs/sec`
-- Average job time: `0.18 sec/job`
-- Worker target utilization: `0.65`
-- Max oldest-message-age SLO: `120 sec`
-- Immediate backlog event depth: `4,000 jobs`
-- Redis per-key footprint (payload + metadata): `420 bytes`
-- Redis write rate: `200 keys/sec`
-- TTL: `900 sec` (15 min)
-- Redis overhead factor: `1.5`
-
-Calculations:
-
-1. **DB pool sizing**
-   - `total_pool_size = 8 × 20 = 160`
-   - Hard limit = `300 - 60 = 240`
-   - Result: `160 <= 240` (safe, with `80` connection margin).
-
-2. **Worker baseline**
-   - `required_workers ≈ 120 × 0.18 / 0.65 = 33.23`
-   - Round up and add 25% safety margin:
-     - `34 × 1.25 = 42.5`, choose `44 workers`.
-
-3. **Backlog burn-down check (44 workers)**
-   - `effective_throughput = (44 / 0.18) × 0.65 = 158.89 jobs/sec`
-   - Net drain rate = `158.89 - 120 = 38.89 jobs/sec`
-   - `backlog_clear_time = 4,000 / 38.89 = 102.85 sec`
-   - Result: `102.85 sec <= 120 sec` SLO (passes with ~17 sec margin).
-
-4. **Redis memory sizing**
-   - Modeled live keys from TTL churn:
-     - `live_key_count ≈ 200 × 900 = 180,000`
-   - `redis_required_bytes = 420 × 180,000 × 1.5 = 113,400,000 bytes`
-   - Approximate memory = `108.1 MiB`
-   - Add 30% safety margin for fragmentation and traffic bursts:
-     - `108.1 × 1.3 ≈ 140.5 MiB` planned minimum.
-
-Recommended production guardrails for this profile:
-
-- Alert if DB pool usage > 75% for 5 minutes.
-- Alert if oldest message age > 90 seconds (early warning before 120-second SLO).
-- Keep Redis max memory policy explicit (`noeviction` for critical coordination keys).
-- Re-run workbook whenever active users or per-user write rates change by >20%.
+| Invariant (strict form) | Enforcement layer | Failure handling | Verification method |
+| --- | --- | --- | --- |
+| `∀ variant_id: available_stock >= 0` | DB constraint (`CHECK (available_stock >= 0)`) + transaction logic in stock decrement path | Reject write if constraint fails; retry only after upstream reconciliation updates stock baseline | Integration test: concurrent reservation/order writes cannot produce negative stock |
+| `reservation.expires_at > reservation.created_at ∧ now > expires_at => reservation.state = EXPIRED ∧ reserved_qty = 0` | Transaction logic on reservation consume path + background reconciler for stale reservations | Reject consume on expired reservation; reconciler marks expired and restores stock | Periodic audit query: find reservations past `expires_at` still marked active |
+| `createOrderIntent(client_token, cart_hash)` is idempotent: repeated requests with same `client_token` return same `order_intent_id` and no duplicate side effects | DB uniqueness constraint on `client_token` + API validator + transaction logic for upsert/return-existing | Reject conflicting payload for same token; return existing intent for exact replay; retry safe on network timeout | Unit test: duplicate intent creation with same token yields identical intent id and single persisted row |
+| `order_state` transitions are monotonic: `state_{n+1} ∈ AllowedSuccessors(state_n)` and never regresses | Transaction logic in order state transition service + API validator | Reject invalid transition; alert on detected regression from external callback/source | Integration test: invalid backward transition (`CONFIRMED -> PENDING`) is rejected |
+| Payment confirmation source-of-truth is unique: `order.payment_confirmed = true` only when verified provider event/receipt exists in canonical payments table | DB constraint/foreign-key to canonical payment record + transaction logic in payment finalization + background reconciler for mismatches | Reject local/manual confirmation writes; reconcile divergent rows; alert on missing/duplicate provider confirmations | Periodic audit query: confirmed orders without canonical payment evidence must be zero |
