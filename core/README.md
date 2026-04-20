@@ -33,32 +33,18 @@ Orders are persisted with `pending_sync = 1` first, then corresponding queue ope
 
 Queue processing is guarded with single-flight (`_isFlushing`) to avoid concurrent flush races.
 
-## Security
+## Cost Optimization and Disaster Recovery
 
-### Payment Proof Upload Threat Model
+Disaster recovery (DR) readiness is validated through recurring drills rather than inferred from architecture diagrams or configuration reviews alone.
 
-#### Threats
+### DR Drill Matrix
 
-- **MIME spoofing:** attackers upload executable or active payloads with falsified `Content-Type` values.
-- **Large-file abuse:** oversized uploads attempt to exhaust bandwidth, storage, or scanning workers.
-- **Replay:** previously valid upload authorizations are reused to attach stale/forged payment proof.
-- **Unauthorized object overwrite:** users attempt key collision or path traversal to replace another order's proof.
-- **Malicious content:** uploaded files embed malware, phishing lures, or weaponized document payloads.
+| Scenario | Cadence | Objective metrics to capture | Pass/fail threshold | Escalation owner | Evidence retention |
+| --- | --- | --- | --- | --- | --- |
+| DB PITR restore | Monthly | Actual RTO, actual data-loss window | **Pass**: RTO <= 60 minutes and data-loss window <= 15 minutes. **Fail**: any breach or unrecoverable restore step. | Database Platform Owner | Runbook updates in `docs/runbooks/`, restore logs in centralized log storage, postmortem in `docs/postmortems/`. |
+| Zone loss | Quarterly | Actual RTO, actual data-loss window | **Pass**: traffic failover and steady-state recovery within 30 minutes, no data-loss window > 5 minutes. **Fail**: manual intervention required outside documented procedure or threshold breach. | SRE On-call Lead | Failover runbook evidence in `docs/runbooks/`, incident timeline/logs in centralized log storage, postmortem in `docs/postmortems/`. |
+| Queue replay | Monthly | Backlog recovery time, actual data-loss window | **Pass**: replay completes within 45 minutes with no lost acknowledged messages. **Fail**: replay exceeds threshold or message loss detected. | Messaging Platform Owner | Replay procedure and checkpoints in `docs/runbooks/`, consumer lag/replay logs in centralized log storage, postmortem in `docs/postmortems/`. |
+| Cache cold-start | Quarterly | Actual RTO, backlog recovery time | **Pass**: p95 latency and error rate return to SLO-compliant range within 20 minutes. **Fail**: sustained SLO violation beyond 20 minutes. | Application Performance Owner | Cache warmup runbook in `docs/runbooks/`, latency/error telemetry in centralized log storage, postmortem in `docs/postmortems/`. |
+| Webhook replay | Semiannual | Backlog recovery time, actual data-loss window | **Pass**: replay completes within 90 minutes with idempotent processing and no duplicate side effects beyond accepted threshold. **Fail**: non-idempotent side effects or threshold breach. | Integrations Owner | Replay and idempotency runbook in `docs/runbooks/`, delivery/retry logs in centralized log storage, postmortem in `docs/postmortems/`. |
 
-#### Controls
-
-- **Strict signed URL conditions:** signed upload policies enforce `content-length-range`, an allowlist of MIME types, and an order-scoped key prefix that cannot be escaped.
-- **One-time upload tokens:** upload intents are minted as single-use tokens cryptographically bound to `order_id` + `user_id` and expire quickly.
-- **Server-side metadata verification:** before state transitions (for example, `awaiting_verification` → `proof_received`), backend verifies object key, size, MIME, checksum/ETag, and token linkage.
-- **Asynchronous malware scanning + quarantine:** all new objects enter a quarantine state, are scanned out-of-band, and only promoted to a trusted prefix after a clean verdict.
-- **Deny-public storage + least privilege IAM:** bucket policies deny any public ACL/policy path; principals get minimal actions scoped to exact prefixes and required operations.
-
-#### Detection
-
-- Alert on abnormal upload size distributions and per-user/per-order upload rate spikes.
-- Alert on repeated signed URL/token signature validation failures (possible brute force or replay probing).
-
-#### Recovery
-
-- Quarantine and re-verification flow: suspicious or newly-indicated-malicious objects are re-quarantined, rescanned with updated signatures, and detached from order state until cleared.
-- Manual review escalation path: route unresolved detections to operations/fraud reviewers with order timeline, uploader identity, metadata, and scan telemetry for explicit disposition.
+**Reporting requirement:** all published RTO/RPO values must be measured from drill evidence artifacts (run records, logs, and postmortems), not from design intent.
