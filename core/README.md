@@ -32,3 +32,19 @@ Orders are persisted with `pending_sync = 1` first, then corresponding queue ope
    - transient failure: exponential backoff + jitter and retry
 
 Queue processing is guarded with single-flight (`_isFlushing`) to avoid concurrent flush races.
+
+## Cost Optimization and Disaster Recovery
+
+Disaster recovery (DR) readiness is validated through recurring drills rather than inferred from architecture diagrams or configuration reviews alone.
+
+### DR Drill Matrix
+
+| Scenario | Cadence | Objective metrics to capture | Pass/fail threshold | Escalation owner | Evidence retention |
+| --- | --- | --- | --- | --- | --- |
+| DB PITR restore | Monthly | Actual RTO, actual data-loss window | **Pass**: RTO <= 60 minutes and data-loss window <= 15 minutes. **Fail**: any breach or unrecoverable restore step. | Database Platform Owner | Runbook updates in `docs/runbooks/`, restore logs in centralized log storage, postmortem in `docs/postmortems/`. |
+| Zone loss | Quarterly | Actual RTO, actual data-loss window | **Pass**: traffic failover and steady-state recovery within 30 minutes, no data-loss window > 5 minutes. **Fail**: manual intervention required outside documented procedure or threshold breach. | SRE On-call Lead | Failover runbook evidence in `docs/runbooks/`, incident timeline/logs in centralized log storage, postmortem in `docs/postmortems/`. |
+| Queue replay | Monthly | Backlog recovery time, actual data-loss window | **Pass**: replay completes within 45 minutes with no lost acknowledged messages. **Fail**: replay exceeds threshold or message loss detected. | Messaging Platform Owner | Replay procedure and checkpoints in `docs/runbooks/`, consumer lag/replay logs in centralized log storage, postmortem in `docs/postmortems/`. |
+| Cache cold-start | Quarterly | Actual RTO, backlog recovery time | **Pass**: p95 latency and error rate return to SLO-compliant range within 20 minutes. **Fail**: sustained SLO violation beyond 20 minutes. | Application Performance Owner | Cache warmup runbook in `docs/runbooks/`, latency/error telemetry in centralized log storage, postmortem in `docs/postmortems/`. |
+| Webhook replay | Semiannual | Backlog recovery time, actual data-loss window | **Pass**: replay completes within 90 minutes with idempotent processing and no duplicate side effects beyond accepted threshold. **Fail**: non-idempotent side effects or threshold breach. | Integrations Owner | Replay and idempotency runbook in `docs/runbooks/`, delivery/retry logs in centralized log storage, postmortem in `docs/postmortems/`. |
+
+**Reporting requirement:** all published RTO/RPO values must be measured from drill evidence artifacts (run records, logs, and postmortems), not from design intent.
