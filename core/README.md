@@ -39,6 +39,15 @@ Disaster recovery (DR) readiness is validated through recurring drills rather th
 
 ### DR Drill Matrix
 
+Canonical runbooks and postmortem template for this matrix:
+
+- `DB PITR restore`: [`docs/runbooks/db-pitr-restore.md`](../docs/runbooks/db-pitr-restore.md)
+- `Zone loss failover`: [`docs/runbooks/zone-loss-failover.md`](../docs/runbooks/zone-loss-failover.md)
+- `Queue replay`: [`docs/runbooks/queue-replay.md`](../docs/runbooks/queue-replay.md)
+- `Cache cold-start`: [`docs/runbooks/cache-cold-start.md`](../docs/runbooks/cache-cold-start.md)
+- `Webhook replay`: [`docs/runbooks/webhook-replay.md`](../docs/runbooks/webhook-replay.md)
+- Postmortem template (mandatory): [`docs/postmortems/template.md`](../docs/postmortems/template.md)
+
 | Scenario | Cadence | Objective metrics to capture | Pass/fail threshold | Escalation owner | Evidence retention |
 | --- | --- | --- | --- | --- | --- |
 | DB PITR restore | Monthly | Actual RTO, actual data-loss window | **Pass**: RTO <= 60 minutes and data-loss window <= 15 minutes. **Fail**: any breach or unrecoverable restore step. | Database Platform Owner | Runbook updates in `docs/runbooks/`, restore logs in centralized log storage, postmortem in `docs/postmortems/`. |
@@ -48,3 +57,5 @@ Disaster recovery (DR) readiness is validated through recurring drills rather th
 | Webhook replay | Semiannual | Backlog recovery time, actual data-loss window | **Pass**: replay completes within 90 minutes with idempotent processing and no duplicate side effects beyond accepted threshold. **Fail**: non-idempotent side effects or threshold breach. | Integrations Owner | Replay and idempotency runbook in `docs/runbooks/`, delivery/retry logs in centralized log storage, postmortem in `docs/postmortems/`. |
 
 **Reporting requirement:** all published RTO/RPO values must be measured from drill evidence artifacts (run records, logs, and postmortems), not from design intent.
+
+**Enforcement rule:** each completed DR drill must reference one runbook in `docs/runbooks/` and one completed postmortem based on `docs/postmortems/template.md`; drills without both artifacts are non-compliant.
